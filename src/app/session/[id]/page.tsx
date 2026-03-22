@@ -63,7 +63,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       const data = await res.json();
       setSession(data.session);
       setParticipants(data.participants);
-      setActiveStory(data.stories.find((s:any) => s.status === 'active') || null);
+      const latestStory = data.stories?.length > 0 
+        ? [...data.stories].sort((a:any, b:any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] 
+        : null;
+      setActiveStory(latestStory);
       setVotes(data.votes);
       fetchBoardTasks(); // Hydrate board tasks dynamically
     } catch(err) {
@@ -79,7 +82,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   };
 
   const fetchActiveStory = async () => {
-    const { data } = await supabase.from('stories').select('*').eq('session_id', sessionId).eq('status', 'active').order('created_at', { ascending: false }).limit(1).single();
+    const { data } = await supabase.from('stories').select('*').eq('session_id', sessionId).order('created_at', { ascending: false }).limit(1).single();
     if (data) setActiveStory(data || null);
   };
 
@@ -252,6 +255,10 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
         <div style={{ textAlign: 'center' }}>
           <h2 style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>{activeStory?.title || 'Voting...'}</h2>
+          
+          <div style={{ fontSize: '1.1rem', opacity: 0.8, marginTop: '0.5rem' }}>
+            {votesCount} / {participants.length} votes cast
+          </div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
@@ -267,9 +274,13 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
           ))}
         </div>
 
-        {isHost && allVoted && (
-          <Button onClick={() => onAction('reveal')} fullWidth>
-            Reveal Votes
+        {isHost && (
+          <Button 
+            onClick={() => onAction('reveal')} 
+            fullWidth 
+            variant={allVoted ? 'primary' : 'ghost'}
+          >
+            {allVoted ? 'Reveal Votes' : 'Force Reveal Votes'}
           </Button>
         )}
       </div>
