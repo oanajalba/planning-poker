@@ -10,7 +10,7 @@ CREATE TABLE sessions (
   v_app_version TEXT NOT NULL,
   name TEXT,
   mode TEXT NOT NULL CHECK (mode IN ('poker', 'board')),
-  status TEXT NOT NULL DEFAULT 'lobby' CHECK (status IN ('lobby', 'voting', 'revealed', 'finalized', 'board')),
+  status TEXT NOT NULL DEFAULT 'lobby' CHECK (status IN ('lobby', 'voting', 'revealed', 'board')),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -30,9 +30,13 @@ CREATE TABLE stories (
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'completed')),
   final_estimate TEXT,
+  average_vote NUMERIC,
+  suggested_estimate TEXT,
+  revealed_votes JSONB,
   order_index INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
 
 -- 4. Votes Table
 CREATE TABLE votes (
@@ -66,3 +70,11 @@ ALTER PUBLICATION supabase_realtime ADD TABLE participants;
 ALTER PUBLICATION supabase_realtime ADD TABLE stories;
 ALTER PUBLICATION supabase_realtime ADD TABLE votes;
 ALTER PUBLICATION supabase_realtime ADD TABLE board_tasks;
+
+-- ============================================================
+-- v0.2 Migration — run in Supabase SQL Editor on existing DBs
+-- ============================================================
+-- ALTER TABLE stories ADD COLUMN IF NOT EXISTS average_vote NUMERIC;
+-- ALTER TABLE stories ADD COLUMN IF NOT EXISTS suggested_estimate TEXT;
+-- ALTER TABLE stories ADD COLUMN IF NOT EXISTS revealed_votes JSONB;
+-- (final_estimate already exists from v0.1 — no change needed)

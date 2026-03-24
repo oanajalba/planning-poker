@@ -44,29 +44,35 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         return NextResponse.json({ success: true }, { status: 200 });
       }
 
-      case 'accept_estimate': {
-        const estimate = payload?.estimate;
-        if (!estimate) return NextResponse.json({ error: 'Estimate is required' }, { status: 400 });
-        
-        const activeStory = await getActiveStory(id);
-        if (!activeStory) return NextResponse.json({ error: 'No active story' }, { status: 400 });
-
-        await supabase.from('stories').update({ final_estimate: estimate, status: 'completed' }).eq('id', activeStory.id);
-        await supabase.from('sessions').update({ status: 'finalized' }).eq('id', id);
-        return NextResponse.json({ success: true }, { status: 200 });
-      }
-
       case 'revote': {
         const activeStory = await getActiveStory(id);
         if (!activeStory) return NextResponse.json({ error: 'No active story' }, { status: 400 });
         
-        // delete all votes for this story and reset session status
+        // Delete all votes for this story and return to voting state (same story, same title)
         await supabase.from('votes').delete().eq('story_id', activeStory.id);
         await supabase.from('sessions').update({ status: 'voting' }).eq('id', id);
         return NextResponse.json({ success: true }, { status: 200 });
       }
 
-      case 'next_story': {
+      case 'next': {
+        // Replaces accept_estimate + next_story. Saves history and returns to lobby.
+        const { average_vote, suggested_estimate, final_estimate, revealed_votes } = payload || {};
+
+        if (!final_estimate) {
+          return NextResponse.json({ error: 'final_estimate is required' }, { status: 400 });
+        }
+
+        const activeStory = await getActiveStory(id);
+        if (!activeStory) return NextResponse.json({ error: 'No active story' }, { status: 400 });
+
+        await supabase.from('stories').update({
+          status: 'completed',
+          final_estimate,
+          average_vote: average_vote ?? null,
+          suggested_estimate: suggested_estimate ?? null,
+          revealed_votes: revealed_votes ?? null,
+        }).eq('id', activeStory.id);
+
         await supabase.from('sessions').update({ status: 'lobby' }).eq('id', id);
         return NextResponse.json({ success: true }, { status: 200 });
       }

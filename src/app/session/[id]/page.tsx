@@ -15,6 +15,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [session, setSession] = useState<any>(null);
   const [participants, setParticipants] = useState<any[]>([]);
   const [activeStory, setActiveStory] = useState<any>(null);
+  const [completedStories, setCompletedStories] = useState<any[]>([]);
   const [votes, setVotes] = useState<any[]>([]);
   const [boardTasks, setBoardTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,12 +37,17 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     const channel = supabase.channel(`session:${sessionId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, (payload) => {
         setSession(payload.new);
+        // Revote deletes rows — realtime DELETE events are unreliable with row-level filters.
+        // Piggyback on the session UPDATE event to clear stale vote state.
+        if ((payload.new as any)?.status === 'voting') {
+          fetchVotes();
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, () => {
         fetchParticipants();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stories', filter: `session_id=eq.${sessionId}` }, () => {
-        fetchActiveStory();
+        fetchStories();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'votes', filter: `session_id=eq.${sessionId}` }, () => {
         fetchVotes();
@@ -63,12 +69,13 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       const data = await res.json();
       setSession(data.session);
       setParticipants(data.participants);
-      const latestStory = data.stories?.length > 0 
-        ? [...data.stories].sort((a:any, b:any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] 
-        : null;
-      setActiveStory(latestStory);
+      const active = data.stories?.find((s: any) => s.status === 'active') ?? null;
+      const completed = data.stories?.filter((s: any) => s.status === 'completed')
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()) ?? [];
+      setActiveStory(active);
+      setCompletedStories(completed);
       setVotes(data.votes);
-      fetchBoardTasks(); // Hydrate board tasks dynamically
+      fetchBoardTasks();
     } catch(err) {
       console.error(err);
     } finally {
@@ -81,9 +88,15 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     if (data) setParticipants(data);
   };
 
-  const fetchActiveStory = async () => {
-    const { data } = await supabase.from('stories').select('*').eq('session_id', sessionId).order('created_at', { ascending: false }).limit(1).single();
-    if (data) setActiveStory(data || null);
+  const fetchStories = async () => {
+    const { data } = await supabase.from('stories').select('*').eq('session_id', sessionId).order('created_at', { ascending: true });
+    if (data) {
+      const active = data.find((s: any) => s.status === 'active') ?? null;
+      const completed = data.filter((s: any) => s.status === 'completed')
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setActiveStory(active);
+      setCompletedStories(completed);
+    }
   };
 
   const fetchVotes = async () => {
@@ -162,7 +175,8 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         <PokerStateMachine 
           session={session} 
           participants={participants} 
-          activeStory={activeStory} 
+          activeStory={activeStory}
+          completedStories={completedStories}
           votes={votes} 
           identity={localIdentity} 
           onAction={handleAction}
@@ -182,14 +196,49 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   );
 }
 
-// Keep PokerStateMachine as previously written
-function PokerStateMachine({ session, participants, activeStory, votes, identity, onAction, onVote }: any) {
-  const isHost = identity.isHost;
-  const myVote = activeStory ? votes.find((v:any) => v.participant_id === identity.participantId && v.story_id === activeStory.id) : null;
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
+const POKER_VALUES = ['1', '2', '3', '5', '8', '13', '21'];
+const FIBONACCI = [...POKER_VALUES, '?'];
+
+/** Compute numeric average of votes (ignoring non-numeric values like '?') */
+function computeAverage(voteValues: string[]): number | null {
+  const numeric = voteValues.map(Number).filter((n, i) => !isNaN(n) && voteValues[i] !== '?');
+  if (numeric.length === 0) return null;
+  return numeric.reduce((a, b) => a + b, 0) / numeric.length;
+}
+
+/** Find the nearest valid planning poker value to a given number */
+function nearestPokerValue(avg: number): string {
+  const numericValues = POKER_VALUES.map(Number);
+  let closest = numericValues[0];
+  let minDiff = Math.abs(avg - closest);
+  for (const v of numericValues) {
+    const diff = Math.abs(avg - v);
+    if (diff < minDiff) { minDiff = diff; closest = v; }
+  }
+  return String(closest);
+}
+
+/** Build revealed_votes snapshot: array of { name, value } */
+function buildRevealedVotes(participants: any[], votes: any[], storyId: string) {
+  return participants.map(p => {
+    const v = votes.find((v: any) => v.participant_id === p.id && v.story_id === storyId);
+    return { name: p.name, value: v ? v.value : null };
+  });
+}
+
+// ─── Main Poker State Machine ────────────────────────────────────────────────
+
+function PokerStateMachine({ session, participants, activeStory, completedStories, votes, identity, onAction, onVote }: any) {
+  const isHost = identity.isHost;
+  const myVote = activeStory ? votes.find((v: any) => v.participant_id === identity.participantId && v.story_id === activeStory.id) : null;
+
+  // ── Lobby ──────────────────────────────────────────────────────────────────
   if (session.status === 'lobby') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+        {/* Session code */}
         <div style={{ backgroundColor: 'var(--secondary-color)', padding: '1rem', borderRadius: '8px' }}>
           <p style={{ margin: 0, fontSize: '0.9rem', opacity: 0.8 }}>Session Link / Code</p>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
@@ -202,10 +251,11 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
           </div>
         </div>
         
+        {/* Participants */}
         <div>
           <h3 style={{ fontSize: '1.1rem', opacity: 0.8 }}>Participants ({participants.length})</h3>
           <ul style={{ listStyle: 'none', padding: 0, marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            {participants.map((p:any) => (
+            {participants.map((p: any) => (
               <li key={p.id} style={{ padding: '0.75rem', backgroundColor: 'var(--bg-color)', border: '1px solid var(--border-color)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ fontWeight: p.id === identity.participantId ? 'bold' : 'normal' }}>
                   {p.name} {p.id === identity.participantId && '(You)'}
@@ -224,26 +274,38 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
             Start Voting
           </Button>
         )}
+
+        {/* History */}
+        {completedStories.length > 0 && (
+          <CompletedStoriesHistory stories={completedStories} participants={participants} />
+        )}
       </div>
     );
   }
 
+  // ── Voting ─────────────────────────────────────────────────────────────────
   if (session.status === 'voting') {
-    const FIBONACCI = ['1','2','3','5','8','13','21','?'];
     const hasVoted = !!myVote;
-    const votesCount = votes.filter((v:any) => v.story_id === activeStory?.id).length;
+    const storyVotes = votes.filter((v: any) => v.story_id === activeStory?.id);
+    const votesCount = storyVotes.length;
     const allVoted = votesCount === participants.length;
 
+    // Waiting view (already voted, waiting for others)
     if (hasVoted && !allVoted) {
       return (
-        <div style={{ textAlign: 'center', marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-          <h2>Waiting for others</h2>
-          <div style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--primary-color)' }}>
-            {votesCount} / {participants.length}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+          <div style={{ textAlign: 'center', marginTop: '1rem' }}>
+            <h2 style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>{activeStory?.title}</h2>
+            <div style={{ fontSize: '3rem', fontWeight: 'bold', color: 'var(--primary-color)', lineHeight: 1 }}>
+              {votesCount} / {participants.length}
+            </div>
+            <p style={{ opacity: 0.7, marginTop: '0.5rem' }}>votes cast</p>
           </div>
-          <p>votes cast</p>
+
+          <VoteStatusList participants={participants} votes={storyVotes} />
+
           {isHost && (
-            <Button variant="ghost" onClick={() => onAction('reveal')} style={{ marginTop: '2rem' }}>
+            <Button variant="ghost" onClick={() => onAction('reveal')} style={{ marginTop: '1rem' }}>
               Force Reveal Votes
             </Button>
           )}
@@ -251,23 +313,32 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
       );
     }
 
+    // Voting view
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
         <div style={{ textAlign: 'center' }}>
           <h2 style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>{activeStory?.title || 'Voting...'}</h2>
-          
-          <div style={{ fontSize: '1.1rem', opacity: 0.8, marginTop: '0.5rem' }}>
+          <div style={{ fontSize: '1rem', opacity: 0.7 }}>
             {votesCount} / {participants.length} votes cast
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
+        <VoteStatusList participants={participants} votes={storyVotes} />
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem' }}>
           {FIBONACCI.map(val => (
             <Card 
               key={val} 
               interactive 
               onClick={() => !hasVoted && onVote(val)}
-              style={{ opacity: hasVoted ? 0.5 : 1, padding: '1rem', fontSize: '1.5rem' }}
+              style={{ 
+                opacity: hasVoted ? 0.4 : 1, 
+                padding: '1.25rem 0.5rem', 
+                fontSize: '1.5rem', 
+                textAlign: 'center',
+                cursor: hasVoted ? 'not-allowed' : 'pointer',
+                outline: myVote?.value === val ? '2px solid var(--primary-color)' : 'none',
+              }}
             >
               {val}
             </Card>
@@ -287,54 +358,228 @@ function PokerStateMachine({ session, participants, activeStory, votes, identity
     );
   }
 
+  // ── Revealed ───────────────────────────────────────────────────────────────
   if (session.status === 'revealed') {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-        <h2 style={{ textAlign: 'center' }}>{activeStory?.title}</h2>
-        
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '1rem' }}>
-          {participants.map((p:any) => {
-            const v = votes.find((v:any) => v.participant_id === p.id && v.story_id === activeStory?.id);
-            return (
-              <div key={p.id} style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                <Card style={{ padding: '1.5rem', fontSize: '2rem', backgroundColor: 'var(--secondary-color)', color: 'var(--text-color)', border: 'none' }}>
-                  {v ? v.value : '—'}
-                </Card>
-                <span style={{ fontSize: '0.9rem', fontWeight: p.id === identity.participantId ? 'bold' : 'normal' }}>{p.name}</span>
-              </div>
-            );
-          })}
-        </div>
+      <RevealedView
+        activeStory={activeStory}
+        participants={participants}
+        votes={votes}
+        identity={identity}
+        isHost={isHost}
+        onAction={onAction}
+      />
+    );
+  }
 
-        {isHost && (
-          <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
-            <Button variant="ghost" onClick={() => onAction('revote')} fullWidth>Revote</Button>
-            <Button onClick={() => {
-              const est = prompt('Enter final estimate for this story:');
-              if (est) onAction('accept_estimate', { estimate: est });
-            }} fullWidth>Accept Estimate</Button>
+  return <div style={{ opacity: 0.5 }}>Unhandled session state: {session.status}</div>;
+}
+
+// ─── Vote Status List (no values shown) ──────────────────────────────────────
+
+function VoteStatusList({ participants, votes }: { participants: any[]; votes: any[] }) {
+  const votedIds = new Set(votes.map((v: any) => v.participant_id));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+      {participants.map((p: any) => {
+        const voted = votedIds.has(p.id);
+        return (
+          <div key={p.id} style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            padding: '0.6rem 0.8rem',
+            borderRadius: '8px',
+            backgroundColor: 'var(--bg-color)',
+            border: '1px solid var(--border-color)',
+          }}>
+            <span style={{ fontSize: '0.95rem' }}>{p.name}</span>
+            <span style={{ fontSize: '0.85rem', color: voted ? 'var(--primary-color)' : 'var(--text-color)', opacity: voted ? 1 : 0.45 }}>
+              {voted ? '✅ Voted' : '⏳ Waiting'}
+            </span>
           </div>
-        )}
-      </div>
-    );
-  }
+        );
+      })}
+    </div>
+  );
+}
 
-  if (session.status === 'finalized') {
-    return (
-      <div style={{ textAlign: 'center', marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-        <h2>Estimate Accepted</h2>
-        <Card style={{ padding: '3rem', fontSize: '5rem', margin: '0 auto', maxWidth: '250px', backgroundColor: 'var(--primary-color)', color: '#fff', border: 'none' }}>
-          {activeStory?.final_estimate}
-        </Card>
-        
-        {isHost && (
-          <Button onClick={() => onAction('next_story')} fullWidth style={{ marginTop: '2rem' }}>
-            Next Story
-          </Button>
-        )}
-      </div>
-    );
-  }
+// ─── Revealed View ────────────────────────────────────────────────────────────
 
-  return <div>Unhandled mapping for session state</div>;
+function RevealedView({ activeStory, participants, votes, identity, isHost, onAction }: any) {
+  const storyVotes = votes.filter((v: any) => v.story_id === activeStory?.id);
+  const voteValues = storyVotes.map((v: any) => v.value);
+
+  const avg = computeAverage(voteValues);
+  const suggested = avg !== null ? nearestPokerValue(avg) : null;
+
+  const [adjustMode, setAdjustMode] = useState(false);
+  const [adjustValue, setAdjustValue] = useState<string | null>(null);
+
+  const handleNext = (overrideFinalEstimate?: string) => {
+    const revealedVotes = buildRevealedVotes(participants, votes, activeStory?.id);
+    onAction('next', {
+      average_vote: avg,
+      suggested_estimate: suggested,
+      final_estimate: overrideFinalEstimate ?? suggested ?? '?',
+      revealed_votes: revealedVotes,
+    });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+      <h2 style={{ textAlign: 'center', fontSize: '1.4rem', margin: 0 }}>{activeStory?.title}</h2>
+
+      {/* Vote cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.75rem' }}>
+        {participants.map((p: any) => {
+          const v = storyVotes.find((v: any) => v.participant_id === p.id);
+          return (
+            <div key={p.id} style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+              <Card style={{ padding: '1.5rem 0.5rem', fontSize: '2rem', backgroundColor: 'var(--secondary-color)', border: 'none', textAlign: 'center' }}>
+                {v ? v.value : '—'}
+              </Card>
+              <span style={{ fontSize: '0.85rem', fontWeight: p.id === identity.participantId ? 'bold' : 'normal', opacity: 0.8 }}>{p.name}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Analytics strip */}
+      {avg !== null && (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'center',
+          gap: '2rem',
+          padding: '0.9rem 1.2rem',
+          backgroundColor: 'var(--secondary-color)',
+          borderRadius: '10px',
+          fontSize: '1rem',
+        }}>
+          <span>Avg: <strong>{avg.toFixed(1)}</strong></span>
+          <span>Suggested: <strong style={{ color: 'var(--primary-color)' }}>{suggested}</strong></span>
+        </div>
+      )}
+
+      {/* Adjust inline picker */}
+      {isHost && adjustMode && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <p style={{ margin: 0, fontSize: '0.9rem', opacity: 0.7, textAlign: 'center' }}>Tap to select final estimate</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.6rem' }}>
+            {POKER_VALUES.map(val => (
+              <button
+                key={val}
+                onClick={() => setAdjustValue(val)}
+                style={{
+                  padding: '1rem 0.5rem',
+                  fontSize: '1.3rem',
+                  fontWeight: 'bold',
+                  borderRadius: '8px',
+                  border: adjustValue === val
+                    ? '2px solid var(--primary-color)'
+                    : '1px solid var(--border-color)',
+                  backgroundColor: adjustValue === val ? 'var(--primary-color)' : 'var(--secondary-color)',
+                  color: adjustValue === val ? '#fff' : 'var(--text-color)',
+                  cursor: 'pointer',
+                  touchAction: 'manipulation',
+                }}
+              >
+                {val}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <Button variant="ghost" onClick={() => { setAdjustMode(false); setAdjustValue(null); }} fullWidth>Cancel</Button>
+            <Button
+              onClick={() => { if (adjustValue) handleNext(adjustValue); }}
+              disabled={!adjustValue}
+              fullWidth
+            >
+              Confirm {adjustValue ? `→ ${adjustValue}` : ''}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Host actions */}
+      {isHost && !adjustMode && (
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <Button variant="ghost" onClick={() => onAction('revote')} fullWidth>Revote</Button>
+          <Button variant="ghost" onClick={() => setAdjustMode(true)} fullWidth>Adjust</Button>
+          <Button onClick={() => handleNext()} fullWidth>Next</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Completed Stories History ─────────────────────────────────────────────
+
+function CompletedStoriesHistory({ stories, participants }: { stories: any[]; participants: any[] }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+      <h3 style={{ fontSize: '1rem', opacity: 0.7, margin: 0 }}>Completed Stories</h3>
+      {stories.map((story: any) => {
+        const revealedVotes: Array<{ name: string; value: string | null }> = story.revealed_votes || [];
+        const ts = story.created_at
+          ? new Date(story.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : '';
+
+        return (
+          <div key={story.id} style={{
+            padding: '0.9rem 1rem',
+            border: '1px solid var(--border-color)',
+            borderRadius: '10px',
+            backgroundColor: 'var(--bg-color)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.5rem',
+          }}>
+            {/* Title + accepted estimate + time */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem' }}>
+              <span style={{ fontWeight: 600, fontSize: '0.95rem' }}>{story.title}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                <span style={{
+                  backgroundColor: 'var(--primary-color)',
+                  color: '#fff',
+                  padding: '0.2rem 0.55rem',
+                  borderRadius: '12px',
+                  fontSize: '0.85rem',
+                  fontWeight: 700,
+                }}>
+                  {story.final_estimate}
+                </span>
+                <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>{ts}</span>
+              </div>
+            </div>
+
+            {/* Avg + suggested */}
+            {(story.average_vote != null || story.suggested_estimate) && (
+              <div style={{ display: 'flex', gap: '1rem', fontSize: '0.82rem', opacity: 0.75 }}>
+                {story.average_vote != null && <span>Avg: {Number(story.average_vote).toFixed(1)}</span>}
+                {story.suggested_estimate && <span>Suggested: {story.suggested_estimate}</span>}
+              </div>
+            )}
+
+            {/* Vote chips */}
+            {revealedVotes.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.1rem' }}>
+                {revealedVotes.map((rv, i) => (
+                  <span key={i} style={{
+                    fontSize: '0.78rem',
+                    padding: '0.15rem 0.45rem',
+                    backgroundColor: 'var(--secondary-color)',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-color)',
+                  }}>
+                    {rv.name}: {rv.value ?? '—'}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
