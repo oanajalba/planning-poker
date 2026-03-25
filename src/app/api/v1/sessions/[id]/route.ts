@@ -50,3 +50,28 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
+
+export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const params = await context.params;
+    const { id } = params;
+    const { mode } = await request.json();
+
+    if (!mode || (mode !== 'poker' && mode !== 'board')) {
+      return NextResponse.json({ error: 'Invalid mode' }, { status: 400 });
+    }
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({ mode })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return NextResponse.json(session, { status: 200 });
+  } catch (err: any) {
+    console.error('Update session error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

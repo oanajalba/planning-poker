@@ -7,6 +7,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { ModeSelector } from '@/components/ui/ModeSelector';
 import { BoardStateMachine } from '@/components/board/BoardStateMachine';
 
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
@@ -154,6 +155,19 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     }
   };
 
+  const handleModeChange = async (mode: 'poker' | 'board') => {
+    if (!localIdentity?.isHost) return;
+    try {
+      await fetch(`/api/v1/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+    } catch(err) {
+      console.error('Failed to change mode', err);
+    }
+  };
+
   if (loading) return <div className="container" style={{ marginTop: '2rem' }}>Loading session...</div>;
   if (!session) return <div className="container" style={{ marginTop: '2rem' }}>Session not found.</div>;
 
@@ -166,9 +180,18 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         </div>
       </Modal>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
         <h1 style={{ fontSize: '1.25rem', opacity: 0.9, margin: 0 }}>{session.name || 'Untitled Session'}</h1>
-        <span style={{ fontSize: '0.8rem', opacity: 0.6, textTransform: 'uppercase' }}>{session.mode} • {session.status}</span>
+        
+        {localIdentity?.isHost ? (
+          <div style={{ width: '220px' }}>
+            <ModeSelector value={session.mode} onChange={handleModeChange} />
+          </div>
+        ) : (
+          <span style={{ fontSize: '0.8rem', opacity: 0.6, textTransform: 'uppercase' }}>
+            {session.mode} • {session.status}
+          </span>
+        )}
       </div>
 
       {localIdentity && session.mode === 'poker' && (
@@ -234,6 +257,24 @@ function PokerStateMachine({ session, participants, activeStory, completedStorie
   const isHost = identity.isHost;
   const myVote = activeStory ? votes.find((v: any) => v.participant_id === identity.participantId && v.story_id === activeStory.id) : null;
 
+  // Inline story title state — replaces window.prompt
+  const [showStoryInput, setShowStoryInput] = React.useState(false);
+  const [storyTitle, setStoryTitle] = React.useState('');
+
+  const [showClearHistoryConfirm, setShowClearHistoryConfirm] = React.useState(false);
+
+  const handleStartVoting = () => {
+    const title = storyTitle.trim() || 'Untitled Story';
+    onAction('start_voting', { title });
+    setShowStoryInput(false);
+    setStoryTitle('');
+  };
+
+  const handleClearHistory = () => {
+    onAction('clear_history');
+    setShowClearHistoryConfirm(false);
+  };
+
   // ── Lobby ──────────────────────────────────────────────────────────────────
   if (session.status === 'lobby') {
     return (
@@ -266,22 +307,56 @@ function PokerStateMachine({ session, participants, activeStory, completedStorie
           </ul>
         </div>
 
-        {isHost && (
-          <Button onClick={() => {
-            const title = prompt('Enter story title:', 'New Task');
-            if(title) onAction('start_voting', { title });
-          }} fullWidth>
+        {/* Start voting — inline story input, no window.prompt */}
+        {isHost && !showStoryInput && (
+          <Button id="start-voting-btn" onClick={() => setShowStoryInput(true)} fullWidth>
             Start Voting
           </Button>
         )}
 
+        {isHost && showStoryInput && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <Input
+              id="story-title-input"
+              label="Story title"
+              value={storyTitle}
+              onChange={e => setStoryTitle(e.target.value)}
+              onKeyDown={(e: React.KeyboardEvent) => { if (e.key === 'Enter') handleStartVoting(); }}
+              fullWidth
+              autoFocus
+            />
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <Button variant="ghost" onClick={() => { setShowStoryInput(false); setStoryTitle(''); }} fullWidth>Cancel</Button>
+              <Button id="confirm-start-voting-btn" onClick={handleStartVoting} fullWidth>Start Voting</Button>
+            </div>
+          </div>
+        )}
+
         {/* History */}
         {completedStories.length > 0 && (
-          <CompletedStoriesHistory stories={completedStories} participants={participants} />
+          <>
+            <CompletedStoriesHistory 
+              stories={completedStories} 
+              participants={participants} 
+              isHost={isHost}
+              onClear={() => setShowClearHistoryConfirm(true)}
+            />
+            
+            <Modal isOpen={showClearHistoryConfirm} onClose={() => setShowClearHistoryConfirm(false)} title="Clear History?">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                <p>Delete all completed stories? This cannot be undone.</p>
+                <div style={{ display: 'flex', gap: '0.75rem' }}>
+                  <Button variant="ghost" onClick={() => setShowClearHistoryConfirm(false)} fullWidth>Cancel</Button>
+                  <Button onClick={handleClearHistory} style={{ backgroundColor: '#ff4444' }} fullWidth>Clear History</Button>
+                </div>
+              </div>
+            </Modal>
+          </>
         )}
       </div>
     );
   }
+
 
   // ── Voting ─────────────────────────────────────────────────────────────────
   if (session.status === 'voting') {
@@ -515,10 +590,20 @@ function RevealedView({ activeStory, participants, votes, identity, isHost, onAc
 
 // ─── Completed Stories History ─────────────────────────────────────────────
 
-function CompletedStoriesHistory({ stories, participants }: { stories: any[]; participants: any[] }) {
+function CompletedStoriesHistory({ stories, participants, isHost, onClear }: { stories: any[]; participants: any[]; isHost?: boolean; onClear?: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-      <h3 style={{ fontSize: '1rem', opacity: 0.7, margin: 0 }}>Completed Stories</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ fontSize: '1rem', opacity: 0.7, margin: 0 }}>Completed Stories</h3>
+        {isHost && (
+          <button 
+            onClick={onClear} 
+            style={{ background: 'none', border: 'none', color: 'var(--error-color, #ff4444)', fontSize: '0.8rem', cursor: 'pointer', opacity: 0.6 }}
+          >
+            Clear History
+          </button>
+        )}
+      </div>
       {stories.map((story: any) => {
         const revealedVotes: Array<{ name: string; value: string | null }> = story.revealed_votes || [];
         const ts = story.created_at

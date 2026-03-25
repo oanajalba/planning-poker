@@ -77,6 +77,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         return NextResponse.json({ success: true }, { status: 200 });
       }
 
+      case 'clear_history': {
+        await supabase.from('stories').delete().eq('session_id', id).eq('status', 'completed');
+        return NextResponse.json({ success: true }, { status: 200 });
+      }
+
       default:
         return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
     }
