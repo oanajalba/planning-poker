@@ -24,7 +24,6 @@ export async function POST(request: Request) {
     const sessionId = crypto.randomUUID();
 
     // 1. Insert session (using standard anon client, since our strict RLS allows any insert on sessions)
-    console.log(`[Sessions API] Creating session ID: ${sessionId}`);
     const { error: sessionError } = await supabase
       .from('sessions')
       .insert({
@@ -41,7 +40,6 @@ export async function POST(request: Request) {
     }
 
     // 2. Mint Custom JWT specifically for this new session
-    console.log(`[Sessions API] Minting JWT for session: ${sessionId}`);
     const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ 
       role: 'anon', 
@@ -56,7 +54,6 @@ export async function POST(request: Request) {
     const token = `${header}.${payload}.${signature}`;
 
     // 3. Create a securely scoped Supabase client to insert the participant
-    console.log(`[Sessions API] Inserting host participant with scoped client...`);
     const scopedSupabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: `Bearer ${token}` } }
     });
@@ -84,10 +81,9 @@ export async function POST(request: Request) {
       status: mode === 'poker' ? 'lobby' : 'board'
     };
 
-    console.log(`[Sessions API] SUCCESS! Session ${sessionId} created.`);
     return NextResponse.json({ session: sessionResponse, host: participant }, { status: 201 });
   } catch (err: any) {
-    console.error('[Sessions API] FATAL ERROR:', err);
+    console.error('Session creation error:', err);
     return NextResponse.json({ error: 'Internal server error', details: err.message }, { status: 500 });
   }
 }
