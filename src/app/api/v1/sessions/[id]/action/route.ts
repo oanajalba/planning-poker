@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getScopedServerClient } from '@/lib/supabaseServer';
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -11,6 +11,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!action || !callerId) {
       return NextResponse.json({ error: 'Missing action or caller identity' }, { status: 400 });
     }
+
+    const supabase = await getScopedServerClient(id);
 
     // Verify caller is the host
     const { data: participant } = await supabase
@@ -45,7 +47,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }
 
       case 'revote': {
-        const activeStory = await getActiveStory(id);
+        const activeStory = await getActiveStory(id, supabase);
         if (!activeStory) return NextResponse.json({ error: 'No active story' }, { status: 400 });
         
         // Delete all votes for this story and return to voting state (same story, same title)
@@ -62,7 +64,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           return NextResponse.json({ error: 'final_estimate is required' }, { status: 400 });
         }
 
-        const activeStory = await getActiveStory(id);
+        const activeStory = await getActiveStory(id, supabase);
         if (!activeStory) return NextResponse.json({ error: 'No active story' }, { status: 400 });
 
         await supabase.from('stories').update({
@@ -91,7 +93,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   }
 }
 
-async function getActiveStory(sessionId: string) {
+async function getActiveStory(sessionId: string, supabase: any) {
   const { data } = await supabase
     .from('stories')
     .select('*')

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getScopedServerClient } from '@/lib/supabaseServer';
 
 export async function POST(request: Request) {
   try {
@@ -8,6 +8,8 @@ export async function POST(request: Request) {
     if (!sessionId || !name) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
+
+    const supabase = await getScopedServerClient(sessionId);
 
     const { data: participant, error } = await supabase
       .from('participants')

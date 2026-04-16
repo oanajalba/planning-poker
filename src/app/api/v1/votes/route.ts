@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getScopedServerClient } from '@/lib/supabaseServer';
 
 export async function POST(request: Request) {
   try {
@@ -8,6 +8,8 @@ export async function POST(request: Request) {
     if (!sessionId || !storyId || !participantId || !value) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
+
+    const supabase = await getScopedServerClient(sessionId);
 
     // Insert vote. Overwrite if duplicate (upserting basically) due to unique constraint
     // Because Supabase handles constraints, we can use an upsert to gracefully handle network loops

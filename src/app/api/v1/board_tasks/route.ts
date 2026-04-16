@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getScopedServerClient } from '@/lib/supabaseServer';
 
 export async function POST(request: Request) {
   try {
@@ -8,6 +8,8 @@ export async function POST(request: Request) {
     if (!sessionId || !title || !callerId) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
+
+    const supabase = await getScopedServerClient(sessionId);
 
     // Verify host
     const { data: host } = await supabase.from('participants').select('is_host').eq('id', callerId).eq('session_id', sessionId).single();
@@ -29,18 +31,16 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const { taskId, status, title, callerId } = await request.json();
+    const { sessionId, taskId, status, title, callerId } = await request.json();
 
-    if (!taskId || !callerId || (!status && !title)) {
+    if (!sessionId || !taskId || !callerId || (!status && !title)) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    // Get task to find session_id
-    const { data: existingTask } = await supabase.from('board_tasks').select('session_id').eq('id', taskId).single();
-    if (!existingTask) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    const supabase = await getScopedServerClient(sessionId);
 
     // Verify host
-    const { data: host } = await supabase.from('participants').select('is_host').eq('id', callerId).eq('session_id', existingTask.session_id).single();
+    const { data: host } = await supabase.from('participants').select('is_host').eq('id', callerId).eq('session_id', sessionId).single();
     if (!host?.is_host) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
 
     const updates: any = {};
@@ -69,25 +69,19 @@ export async function DELETE(request: Request) {
     const sessionId = searchParams.get('sessionId');
     const callerId = searchParams.get('callerId');
 
-    if (!callerId || (!taskId && !sessionId)) {
+    if (!sessionId || !callerId || (!taskId && !sessionId)) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    // Determine target session
-    let targetSessionId = sessionId;
-    if (taskId) {
-      const { data } = await supabase.from('board_tasks').select('session_id').eq('id', taskId).single();
-      if (!data) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-      targetSessionId = data.session_id;
-    }
+    const supabase = await getScopedServerClient(sessionId);
 
     // Verify host
-    const { data: host } = await supabase.from('participants').select('is_host').eq('id', callerId).eq('session_id', targetSessionId).single();
+    const { data: host } = await supabase.from('participants').select('is_host').eq('id', callerId).eq('session_id', sessionId).single();
     if (!host?.is_host) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
 
     let query = supabase.from('board_tasks').delete();
     if (taskId) query = query.eq('id', taskId);
-    else query = query.eq('session_id', targetSessionId);
+    else query = query.eq('session_id', sessionId);
 
     const { error } = await query;
     if (error) throw error;

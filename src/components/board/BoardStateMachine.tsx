@@ -30,7 +30,7 @@ export function BoardStateMachine({ session, participants, boardTasks, identity 
       await fetch('/api/v1/board_tasks', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId: editingTask.id, title: editingTask.title, callerId: identity.participantId })
+        body: JSON.stringify({ sessionId: session.id, taskId: editingTask.id, title: editingTask.title, callerId: identity.participantId })
       });
       setEditingTask(null);
       setShowEditModal(false);
@@ -39,7 +39,7 @@ export function BoardStateMachine({ session, participants, boardTasks, identity 
 
   const handleDeleteTask = async (taskId: string) => {
     try {
-      await fetch(`/api/v1/board_tasks?taskId=${taskId}&callerId=${identity.participantId}`, {
+      await fetch(`/api/v1/board_tasks?sessionId=${session.id}&taskId=${taskId}&callerId=${identity.participantId}`, {
         method: 'DELETE'
       });
     } catch(err) { console.error(err); }
@@ -59,7 +59,7 @@ export function BoardStateMachine({ session, participants, boardTasks, identity 
       await fetch('/api/v1/board_tasks', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, status: newStatus, callerId: identity.participantId })
+        body: JSON.stringify({ sessionId: session.id, taskId, status: newStatus, callerId: identity.participantId })
       });
     } catch(err) { console.error(err); }
   };

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, use } from 'react';
-import { supabase } from '@/lib/supabase';
+import { getSessionClient } from '@/lib/supabase';
 import { getLocalSession, saveLocalSession, LocalSessionData } from '@/lib/storage';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -20,46 +20,65 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [votes, setVotes] = useState<any[]>([]);
   const [boardTasks, setBoardTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [authError, setAuthError] = useState(false);
   
   const [localIdentity, setLocalIdentity] = useState<LocalSessionData | null>(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [joinName, setJoinName] = useState('');
   
   useEffect(() => {
-    const identity = getLocalSession(sessionId);
-    if (identity) {
-      setLocalIdentity(identity);
-    } else {
-      setShowJoinModal(true);
-    }
+    let channel: any = null;
+    let currentClient: any = null;
 
-    fetchInitialState();
+    const initializeSession = async () => {
+      // 1. Fetch/Cache our heavily isolated Session-scoped client (incorporating the Token for REST)
+      const client = await getSessionClient(sessionId);
+      if (!client) {
+        setAuthError(true);
+        setLoading(false);
+        return;
+      }
+      currentClient = client;
 
-    const channel = supabase.channel(`session:${sessionId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, (payload) => {
-        setSession(payload.new);
-        // Revote deletes rows — realtime DELETE events are unreliable with row-level filters.
-        // Piggyback on the session UPDATE event to clear stale vote state.
-        if ((payload.new as any)?.status === 'voting') {
+      // 2. We now have RLS permission implicitly baked into the client, setup UI
+      const identity = getLocalSession(sessionId);
+      if (identity) {
+        setLocalIdentity(identity);
+      } else {
+        setShowJoinModal(true);
+      }
+
+      await fetchInitialState();
+
+      // 3. Mount Realtime securely using the isolated client
+      channel = client.channel(`session:${sessionId}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` }, (payload) => {
+          setSession(payload.new);
+          if ((payload.new as any)?.status === 'voting') {
+            fetchVotes();
+          }
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, () => {
+          fetchParticipants();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'stories', filter: `session_id=eq.${sessionId}` }, () => {
+          fetchStories();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'votes', filter: `session_id=eq.${sessionId}` }, () => {
           fetchVotes();
-        }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'participants', filter: `session_id=eq.${sessionId}` }, () => {
-        fetchParticipants();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'stories', filter: `session_id=eq.${sessionId}` }, () => {
-        fetchStories();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'votes', filter: `session_id=eq.${sessionId}` }, () => {
-        fetchVotes();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'board_tasks', filter: `session_id=eq.${sessionId}` }, () => {
-        fetchBoardTasks();
-      })
-      .subscribe();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'board_tasks', filter: `session_id=eq.${sessionId}` }, () => {
+          fetchBoardTasks();
+        })
+        .subscribe();
+    };
+
+    initializeSession();
 
     return () => {
-      supabase.removeChannel(channel);
+      if (currentClient && channel) {
+        currentClient.removeChannel(channel);
+      }
     };
   }, [sessionId]);
 
@@ -85,12 +104,16 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   };
 
   const fetchParticipants = async () => {
-    const { data } = await supabase.from('participants').select('*').eq('session_id', sessionId).order('joined_at');
+    const client = await getSessionClient(sessionId);
+    if (!client) return;
+    const { data } = await client.from('participants').select('*').eq('session_id', sessionId).order('joined_at');
     if (data) setParticipants(data);
   };
 
   const fetchStories = async () => {
-    const { data } = await supabase.from('stories').select('*').eq('session_id', sessionId).order('created_at', { ascending: true });
+    const client = await getSessionClient(sessionId);
+    if (!client) return;
+    const { data } = await client.from('stories').select('*').eq('session_id', sessionId).order('created_at', { ascending: true });
     if (data) {
       const active = data.find((s: any) => s.status === 'active') ?? null;
       const completed = data.filter((s: any) => s.status === 'completed')
@@ -101,14 +124,19 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   };
 
   const fetchVotes = async () => {
-    const { data } = await supabase.from('votes').select('*').eq('session_id', sessionId);
+    const client = await getSessionClient(sessionId);
+    if (!client) return;
+    const { data } = await client.from('votes').select('*').eq('session_id', sessionId);
     if (data) setVotes(data);
   };
 
   const fetchBoardTasks = async () => {
-    const { data } = await supabase.from('board_tasks').select('*').eq('session_id', sessionId).order('created_at');
+    const client = await getSessionClient(sessionId);
+    if (!client) return;
+    const { data } = await client.from('board_tasks').select('*').eq('session_id', sessionId).order('created_at');
     if (data) setBoardTasks(data);
   };
+
 
   const handleJoin = async () => {
     if (!joinName.trim()) return;

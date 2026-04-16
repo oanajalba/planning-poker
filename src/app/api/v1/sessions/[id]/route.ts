@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getScopedServerClient } from '@/lib/supabaseServer';
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -7,6 +7,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const params = await context.params;
     const { id } = params;
     
+    const supabase = await getScopedServerClient(id);
+
     // Fetch session
     const { data: session, error: sessionError } = await supabase
       .from('sessions')
@@ -60,6 +62,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (!mode || (mode !== 'poker' && mode !== 'board')) {
       return NextResponse.json({ error: 'Invalid mode' }, { status: 400 });
     }
+
+    const supabase = await getScopedServerClient(id);
 
     const { data: session, error } = await supabase
       .from('sessions')

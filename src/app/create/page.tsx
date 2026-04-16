@@ -32,7 +32,11 @@ export default function CreateSession() {
         body: JSON.stringify({ name, mode, hostName })
       });
 
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error("Session creation failed:", res.status, errorText);
+        throw new Error(`Server Error (${res.status}): ${errorText || 'Empty Response'}`);
+      }
 
       const data = await res.json();
       
@@ -44,7 +48,8 @@ export default function CreateSession() {
 
       router.push(`/session/${data.session.id}`);
     } catch (err: any) {
-      setError('Failed to create session. Check connection/database setup.');
+      console.error("Catch block caught:", err);
+      setError(err.message || 'Failed to create session. Check connection/database setup.');
       setLoading(false);
     }
   };
